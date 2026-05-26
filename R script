@@ -1,0 +1,370 @@
+# ============================================================
+# Boston Celtics 2024-25 Season Analysis
+# Per 100 Possessions | Advanced Metrics | Lineup Evaluation
+# Data Source: hoopR (ESPN/NBA Stats API)
+# ============================================================
+
+
+install.packages(c("hoopR", "dplyr", "readr", "ggplot2", "tidyr", "scales"))
+
+library(hoopR)
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(tidyr)
+library(scales)
+
+
+# ============================================================
+# SECTION 1: DATA LOAD
+
+cat("Pulling 2024-25 NBA player box scores...\n")
+player_box <- load_nba_player_box(seasons = 2025)
+
+# Remove DNPs and zero-minute entries
+player_box <- player_box %>%
+  filter(
+    !isTRUE(did_not_play),
+    !is.na(minutes),
+    minutes > 0
+  )
+
+#============================================
+# SECTION 2: POSSESSION ESTIMATES
+
+# Team-game totals with estimated possessions
+team_game <- player_box %>%
+group_by(season, game_id, team_id, team_abbreviation) %>%
+  summarise(
+    team_minutes = sum(minutes, na.rm = TRUE),
+    team_fga = sum(field_goals_attempted, na.rm = TRUE),
+    team_fta = sum(free_throws_attempted, na.rm = TRUE),
+    team_fgm  = sum(field_goals_made, na.rm = TRUE),
+    team_oreb = sum(offensive_rebounds, na.rm = TRUE),
+    team_dreb = sum(defensive_rebounds, na.rm = TRUE),
+    team_tov  = sum(turnovers, na.rm = TRUE),
+    team_poss_est = team_fga + 0.44 * team_fta - team_oreb + team_tov,
+    .groups = "drop"
+  )
+
+# Merge opponent totals and calculate balanced game possessions
+team_game <- team_game %>%
+  left_join( team_game,
+    by = c("season", "game_id"),
+    suffix = c("", "_opp"),
+    relationship = "many-to-many" ) %>%
+  filter(team_id != team_id_opp) %>%
+  mutate(game_poss = 0.5 * (team_poss_est + team_poss_est_opp))
+
+# Team season totals for usage calculation
+team_season <- team_game %>%
+  group_by(season, team_id) %>%
+  summarise(
+    team_minutes_total = sum(team_minutes),
+    team_fga_total  = sum(team_fga),
+    team_fta_total = sum(team_fta),
+    team_fgm_total  = sum(team_fgm),
+    team_oreb_total = sum(team_oreb),
+    team_dreb_total = sum(team_dreb),
+    team_tov_total  = sum(team_tov),
+    .groups = "drop"
+  )
+
+player_game_poss <- player_box %>%
+  left_join(
+    team_game %>% select(season, game_id, team_id, team_minutes, game_poss),
+    by = c("season", "game_id", "team_id")
+  ) %>%
+  mutate(player_poss_est = (minutes / team_minutes) * game_poss)
+
+# Player season possessions
+player_season_poss <- player_game_poss %>%
+  group_by(season, athlete_id, team_id) %>%
+  summarise(
+    poss_total = sum(player_poss_est, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+
+# ============================================================
+# SECTION 3: PLAYER SEASON STATS
+
+player_season <- player_box %>%
+  group_by(
+    season,
+    athlete_id,
+    athlete_display_name,
+    position = athlete_position_abbreviation,
+    team_id,
+    team_abbreviation
+  ) %>%
+  summarise(
+    games_played  = n_distinct(game_id),
+    games_started = sum(starter, na.rm = TRUE),
+    minutes_total = sum(minutes),
+    pts_total = sum(points),
+    fga_total  = sum(field_goals_attempted),
+    fgm_total  = sum(field_goals_made),
+    fg3a_total = sum(three_point_field_goals_attempted),
+    fg3m_total = sum(three_point_field_goals_made),
+    fta_total  = sum(free_throws_attempted),
+    ftm_total  = sum(free_throws_made),
+    oreb_total = sum(offensive_rebounds),
+    dreb_total = sum(defensive_rebounds),
+    reb_total = sum(rebounds),
+    ast_total = sum(assists),
+    stl_total  = sum(steals),
+    blk_total  = sum(blocks),
+    tov_total = sum(turnovers),
+    pf_total  = sum(fouls),
+    .groups = "drop"
+  ) %>%
+  left_join(team_season, by = c("season", "team_id")) %>%
+  left_join(player_season_poss, by = c("season", "athlete_id", "team_id")) %>%
+  mutate(
+    fg2m_total = fgm_total - fg3m_total,
+    fg2a_total = fga_total - fg3a_total,
+
+    # Shooting percentages
+    fg_pct  = fgm_total / fga_total,
+    fg3_pct = fg3m_total / fg3a_total,
+    fg2_pct = fg2m_total / fg2a_total,
+    ft_pct  = ftm_total / fta_total,
+    efg_pct = (fgm_total + 0.5 * fg3m_total) / fga_total,
+    ts_pct  = pts_total / (2 * (fga_total + 0.44 * fta_total)),
+
+    # Usage rate
+    usg_weight = fga_total + 0.44 * fta_total + tov_total,
+    usage_rate = (usg_weight * (team_minutes_total / 5)) /
+      (minutes_total * (team_fga_total + 0.44 * team_fta_total + team_tov_total)),
+
+    poss_total = if_else(is.na(poss_total) | poss_total <= 0, NA_real_, poss_total),
+
+    # Per 100 possessions
+    pts_per100  = 100 * pts_total / poss_total,
+    fgm_per100  = 100 * fgm_total / poss_total,
+    fga_per100  = 100 * fga_total / poss_total,
+    fg3m_per100 = 100 * fg3m_total / poss_total,
+    fg3a_per100 = 100 * fg3a_total / poss_total,
+    fg2m_per100 = 100 * fg2m_total / poss_total,
+    fg2a_per100 = 100 * fg2a_total / poss_total,
+    ftm_per100  = 100 * ftm_total  / poss_total,
+    fta_per100  = 100 * fta_total  / poss_total,
+    oreb_per100 = 100 * oreb_total / poss_total,
+    dreb_per100 = 100 * dreb_total / poss_total,
+    reb_per100 = 100 * reb_total  / poss_total,
+    ast_per100 = 100 * ast_total  / poss_total,
+    stl_per100 = 100 * stl_total  / poss_total,
+    blk_per100 = 100 * blk_total  / poss_total,
+    tov_per100 = 100 * tov_total  / poss_total,
+    pf_per100 = 100 * pf_total   / poss_total
+  )
+
+
+# ============================================================
+# SECTION 4: CELTICS ROTATION PLAYERS
+
+# Primary rotation 
+celtics_rotation <- player_season %>%
+  filter(
+    team_abbreviation == "BOS",
+    minutes_total >= 400
+  ) %>%
+  select(
+    Player = athlete_display_name,
+    Pos = position,
+    G = games_played,
+    GS = games_started,
+    MP = minutes_total,
+    PTS = pts_per100,
+    FG = fgm_per100,
+    FGA = fga_per100,
+    `3P` = fg3m_per100,
+    `3PA` = fg3a_per100,
+    FT = ftm_per100,
+    FTA = fta_per100,
+    ORB = oreb_per100,
+    DRB = dreb_per100,
+    TRB = reb_per100,
+    AST = ast_per100,
+    STL = stl_per100,
+    BLK = blk_per100,
+    TOV = tov_per100,
+    PF = pf_per100,
+    `FG%`= fg_pct,
+    `3P%`= fg3_pct,
+    `FT%` = ft_pct,
+    `eFG%`= efg_pct,
+    `TS%`= ts_pct,
+    `USG%` = usage_rate
+  ) %>%
+  arrange(desc(MP))
+
+
+# ============================================================
+# SECTION 5: TEAM FOUR FACTORS
+
+# Celtics team totals
+celtics_totals <- player_season %>%
+  filter(team_abbreviation == "BOS") %>%
+  summarise(
+    total_poss = sum(poss_total, na.rm = TRUE),
+    total_pts  = sum(pts_total),
+    total_fgm  = sum(fgm_total),
+    total_fga  = sum(fga_total),
+    total_fg3m = sum(fg3m_total),
+    total_fta  = sum(fta_total),
+    total_oreb = sum(oreb_total),
+    total_dreb = sum(dreb_total),
+    total_tov  = sum(tov_total)
+  ) %>%
+  mutate(
+    efg_pct = (total_fgm + 0.5 * total_fg3m) / total_fga,
+    tov_rate = total_tov / total_poss,
+    orb_rate = total_oreb / (total_oreb + total_dreb),
+    ftr = total_fta / total_fga
+  )
+
+# League average Four Factors (2024-25 benchmarks)
+league_avg <- tibble(
+  efg_pct  = 0.543,
+  tov_rate = 0.126,
+  orb_rate = 0.252,
+  ftr = 0.190
+)
+
+four_factors_comparison <- bind_rows(
+  celtics_totals %>% select(efg_pct, tov_rate, orb_rate, ftr) %>% mutate(Team = "Boston Celtics"),
+  league_avg %>% mutate(Team = "League Average")
+)
+
+
+# ============================================================
+# SECTION 6: LINEUP NET RATINGS
+
+lineups <- tibble(
+  Lineup = c(
+    "Brown / Hauser / Pritchard / Queta / White",
+    "Brown / Garza / Hauser / Pritchard / White",
+    "Walsh / Hauser / Pritchard / Queta / White",
+    "Brown / Simons / White / Hauser / Queta",
+    "Brown / Garza / Hauser / Simons / White"
+  ),
+  Minutes = c(273, 71, 74, 66, 77),
+  Net_Rating = c(20.9, 19.8, 19.6, 10.3, 10.4),
+  ORtg = c(131, 128, 126, 125, 122),
+  DRtg = c(110, 108, 106, 115, 112),
+  Role = c("Closing", "Rebounding", "Defensive", "Spacing", "Spacing")
+)
+
+
+# ============================================================
+# SECTION 7: VISUALIZATIONS
+
+# Four Factors Comparisons
+four_factors_long <- four_factors_comparison %>%
+  pivot_longer(cols = c(efg_pct, tov_rate, orb_rate, ftr),
+        names_to = "Factor", values_to = "Value") %>%
+  mutate(Factor = recode(Factor,
+    efg_pct  = "eFG%",
+    tov_rate = "TOV Rate",
+    orb_rate = "ORB Rate",
+    ftr = "FT Rate"
+  ))
+
+plot_four_factors <- ggplot(four_factors_long, aes(x = Factor, y = Value, fill = Team)) +
+  geom_col(position = "dodge", width = 0.6) +
+  scale_fill_manual(values = c("Boston Celtics" = "#007A33", "League Average" = "#aaaaaa")) +
+  scale_y_continuous(labels = percent_format(accuracy = 0.1)) +
+  labs(
+    title = "Boston Celtics vs. League Average: Four Factors",
+    subtitle = "2024-25 Season Baseline",
+    x = NULL,
+    y = "Rate",
+    fill = NULL,
+    caption = "Source: NBA Stats via hoopR") +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    legend.position  = "top",
+    panel.grid.major.x = element_blank()
+  )
+
+
+print(plot_four_factors)
+
+
+#  Rotation Player Efficiency (eFG% vs TS%) 
+efficiency_plot_data <- celtics_rotation %>%
+  select(Player,`eFG%`,`TS%`,`USG%`, MP) %>%
+  filter(!is.na(`eFG%`), !is.na(`TS%`))
+
+plot_efficiency <- ggplot(efficiency_plot_data,
+    aes(x =`eFG%`, y =`TS%`, size =`USG%`, label = Player)) +
+  geom_point(color ="#007A33", alpha = 0.75) +
+  geom_text(vjust = -1, size = 3.2, color = "gray30") +
+  geom_vline(xintercept = 0.543, linetype = "dashed", color = "gray60") +
+  geom_hline(yintercept = 0.550, linetype = "dashed", color = "gray60") +
+  scale_x_continuous(labels = percent_format(accuracy = 1)) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  scale_size_continuous(range = c(3, 9), labels = percent_format(accuracy = 1)) +
+  labs(
+    title = "Celtics Rotation: Shooting Efficiency by Player",
+    subtitle = "Dashed lines = league average | Bubble size = usage rate",
+    x = "Effective FG% (eFG%)",
+    y = "True Shooting% (TS%)",
+    size = "Usage Rate",
+    caption = "Source: NBA Stats via hoopR"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold"))
+
+print(plot_efficiency)
+
+
+# Lineup Net Ratings
+plot_lineups <- ggplot(lineups,
+    aes(x = reorder(Lineup, Net_Rating), y = Net_Rating, fill = Role)) +
+  geom_col(width = 0.6) +
+  geom_text(aes(label = paste0("+", Net_Rating)),
+  hjust = -0.2, size = 3.8, fontface = "bold") +
+  coord_flip() +
+  scale_fill_manual(values = c(
+    "Closing" = "#007A33",
+    "Rebounding" = "#BA9B37",
+    "Defensive" = "#1D428A",
+    "Spacing" = "#6F6F6F"
+  )) +
+  scale_y_continuous(limits = c(0, 28)) +
+  labs(
+    title = "Celtics Top Lineup Combinations by Net Rating",
+    subtitle = "2024-25 Season | Minimum 45 minutes together",
+    x = NULL,
+    y = "Net Rating (pts per 100 possessions)",
+    fill = "Lineup Role"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(plot.title = element_text(face = "bold"),
+    panel.grid.major.y = element_blank()
+  )
+
+print(plot_lineups)
+
+
+# ============================================================
+# SECTION 8: EXPORT
+
+export_path <- "~/Desktop/Basketball Analytics/"
+
+dir.create(export_path, showWarnings = FALSE, recursive = TRUE)
+
+write_csv(celtics_rotation, paste0(export_path, "celtics_rotation_stats_2024_25.csv"))
+write_csv(four_factors_comparison,paste0(export_path, "celtics_four_factors_2024_25.csv"))
+write_csv(lineups,paste0(export_path, "celtics_lineups_2024_25.csv"))
+
+ggsave(paste0(export_path, "four_factors.png"),  plot_four_factors, width = 9, height = 6, dpi = 150)
+ggsave(paste0(export_path, "efficiency.png"),  plot_efficiency, width = 10, height = 7, dpi = 150)
+ggsave(paste0(export_path, "lineups.png"), plot_lineups, width = 11, height = 6, dpi = 150)
+
+cat("Export complete.\n")
+cat("Files saved to:", export_path, "\n")
