@@ -1,1 +1,2 @@
 # Celtics-2025-26-Season-Projection-Project
+The Boston Celtics enter the 2025–26 season facing a significant roster transition. In this project, I developed a data-driven coaching and roster strategy for the Boston Celtics' projected 2025–2026 season. The objective was to evaluate team performance metrics, analyze individual player impact, and recommend optimal lineup combinations that could maximize team efficiency and win probability.
